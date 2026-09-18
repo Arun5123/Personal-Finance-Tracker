@@ -1,0 +1,10 @@
+# This file configures the Flutter SDK path for Android builds.
+# Copy this to `local.properties` (or let `flutter pub get` generate it).
+# This file is NOT tracked in version control.
+
+# Path to the Flutter SDK on this machine.
+flutter.sdk=/Users/arun/Downloads/flutter
+
+# Flutter version info (auto-generated).
+flutter.versionCode=1
+flutter.versionName=1.0.0
