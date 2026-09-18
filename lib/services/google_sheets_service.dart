@@ -155,6 +155,59 @@ class GoogleSheetsService {
     );
   }
 
+  /// Updates an existing data row at [rowNumber] (1-based, as it appears
+  /// in the sheet itself) with the given values.
+  Future<void> updateRow({
+    required String spreadsheetId,
+    required String sheetName,
+    required int rowNumber,
+    required List<String> rowValues,
+  }) async {
+    final sheetsApi = await _authService.sheetsApi;
+    await sheetsApi.spreadsheets.values.update(
+      sheets.ValueRange(values: [rowValues]),
+      spreadsheetId,
+      "'$sheetName'!A$rowNumber",
+      valueInputOption: 'USER_ENTERED',
+    );
+  }
+
+  /// Deletes the data row at [rowNumber] (1-based) from the sheet tab.
+  Future<void> deleteRow({
+    required String spreadsheetId,
+    required String sheetName,
+    required int rowNumber,
+  }) async {
+    final sheetsApi = await _authService.sheetsApi;
+    final info = await sheetsApi.spreadsheets.get(spreadsheetId);
+    int? sheetId;
+    for (final sheet in info.sheets ?? const <sheets.Sheet>[]) {
+      if (sheet.properties?.title == sheetName) {
+        sheetId = sheet.properties?.sheetId;
+        break;
+      }
+    }
+    if (sheetId == null) return;
+
+    await sheetsApi.spreadsheets.batchUpdate(
+      sheets.BatchUpdateSpreadsheetRequest(
+        requests: [
+          sheets.Request(
+            deleteDimension: sheets.DeleteDimensionRequest(
+              range: sheets.DimensionRange(
+                sheetId: sheetId,
+                dimension: 'ROWS',
+                startIndex: rowNumber - 1,
+                endIndex: rowNumber,
+              ),
+            ),
+          ),
+        ],
+      ),
+      spreadsheetId,
+    );
+  }
+
   /// Fetches all rows from the specified tab.
   /// Returns a list of rows, where each row is a list of cell values.
   Future<List<List<String>>> getSheetData({

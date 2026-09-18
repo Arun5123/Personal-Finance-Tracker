@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import '../models/field_definition.dart';
 import '../models/sheet.dart';
 import '../state/app_state.dart';
 import '../widgets/app_animations.dart';
@@ -32,7 +34,13 @@ class _DataViewScreenState extends State<DataViewScreen> {
   String? _sortColumn;
   bool _sortAscending = true;
 
+  // True while a row is being updated/deleted on the remote sheet.
+  bool _isMutating = false;
+
   bool get _hasActiveFilters => _activeFilters.isNotEmpty;
+
+  // Imported sheets are read-only: no row editing or deleting.
+  bool get _canEditRows => !widget.sheet.isImported;
 
   @override
   void initState() {
@@ -107,7 +115,8 @@ class _DataViewScreenState extends State<DataViewScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'Read-only — imported from an external Excel file',
+                      'Read-only — imported from an external Excel file. '
+                      'Editing and deleting entries are disabled.',
                       style: TextStyle(
                         fontSize: 12,
                         color: Colors.green.shade800,
@@ -119,6 +128,7 @@ class _DataViewScreenState extends State<DataViewScreen> {
               ),
             ),
           if (_hasActiveFilters) _buildActiveFilterChips(),
+          if (_isMutating) const LinearProgressIndicator(),
           Expanded(child: _buildBody()),
         ],
       ),
@@ -183,58 +193,92 @@ class _DataViewScreenState extends State<DataViewScreen> {
     }
 
     // Build a scrollable, filterable, sortable table view.
-    final visibleRows = _visibleRows;
-    if (visibleRows.isEmpty) {
+    final visibleIndices = _visibleRowIndices;
+    if (visibleIndices.isEmpty) {
       return _buildNoMatchesState();
     }
 
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 250),
       child: SingleChildScrollView(
-        key: ValueKey(visibleRows.length),
+        key: ValueKey(visibleIndices.length),
         scrollDirection: Axis.horizontal,
         child: SingleChildScrollView(
           child: DataTable(
             headingRowColor: MaterialStateProperty.all(Colors.blue.shade50),
             dataRowMinHeight: 44,
             dataRowMaxHeight: 56,
-            columns: _headers
-                .map(
-                  (h) => DataColumn(label: _buildHeaderLabel(h)),
-                )
-                .toList(),
-            rows: visibleRows
-                .map(
-                  (row) => DataRow(
-                    cells: List.generate(
-                      _headers.length,
-                      (i) => DataCell(
+            columns: [
+              for (final h in _headers) DataColumn(label: _buildHeaderLabel(h)),
+              if (_canEditRows)
+                const DataColumn(label: SizedBox.shrink()),
+            ],
+            rows: [
+              for (final i in visibleIndices)
+                DataRow(
+                  cells: [
+                    for (var c = 0; c < _headers.length; c++)
+                      DataCell(
                         Text(
-                          i < row.length ? row[i] : '',
+                          c < _rows[i].length ? _rows[i][c] : '',
                           style: const TextStyle(fontSize: 13),
                         ),
                       ),
-                    ),
-                  ),
-                )
-                .toList(),
+                    // Edit / delete actions for every row. Hidden
+                    // entirely for imported (read-only) sheets.
+                    if (_canEditRows)
+                      DataCell(
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(
+                                Icons.edit_outlined,
+                                size: 18,
+                                color: AppColors.primary,
+                              ),
+                              tooltip: 'Edit this entry',
+                              onPressed: _isMutating
+                                  ? null
+                                  : () => _showEditDialog(i),
+                            ),
+                            IconButton(
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                size: 18,
+                                color: Colors.red,
+                              ),
+                              tooltip: 'Delete this entry',
+                              onPressed: _isMutating
+                                  ? null
+                                  : () => _confirmDeleteRow(i),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+            ],
           ),
         ),
       ),
     );
   }
 
-  /// Rows after applying every active filter and the current sort.
-  List<List<String>> get _visibleRows {
-    Iterable<List<String>> rows = _rows;
+  /// Indices into [_rows] after applying every active filter and the
+  /// current sort. The sheet row number for index i is i + 2, because
+  /// row 1 is the header row.
+  List<int> get _visibleRowIndices {
+    var indices = List<int>.generate(_rows.length, (i) => i);
 
     // Apply all active filters (multiple columns can be combined).
     if (_activeFilters.isNotEmpty) {
-      rows = rows.where((row) {
+      indices = indices.where((i) {
+        final row = _rows[i];
         for (final entry in _activeFilters.entries) {
-          final i = _headers.indexOf(entry.key);
-          if (i < 0) continue;
-          final cell = i < row.length ? row[i].trim() : '';
+          final c = _headers.indexOf(entry.key);
+          if (c < 0) continue;
+          final cell = c < row.length ? row[c].trim() : '';
           if (entry.value == '(empty)') {
             if (cell.isNotEmpty) return false;
           } else if (cell != entry.value) {
@@ -242,25 +286,33 @@ class _DataViewScreenState extends State<DataViewScreen> {
           }
         }
         return true;
-      });
+      }).toList();
     }
-
-    final result = rows.toList();
 
     // Apply the current sort (numeric-aware).
     if (_sortColumn != null) {
       final sortIndex = _headers.indexOf(_sortColumn!);
       if (sortIndex >= 0) {
-        result.sort((r1, r2) {
-          final a = sortIndex < r1.length ? r1[sortIndex] : '';
-          final b = sortIndex < r2.length ? r2[sortIndex] : '';
+        indices.sort((i1, i2) {
+          final a =
+              sortIndex < _rows[i1].length ? _rows[i1][sortIndex] : '';
+          final b =
+              sortIndex < _rows[i2].length ? _rows[i2][sortIndex] : '';
           final cmp = _compareValues(a, b);
           return _sortAscending ? cmp : -cmp;
         });
       }
     }
 
-    return result;
+    return indices;
+  }
+
+  /// Best-effort field type for a header, from the sheet's definitions.
+  FieldType? _fieldTypeFor(String header) {
+    for (final f in widget.sheet.fields) {
+      if (f.label == header) return f.type;
+    }
+    return null;
   }
 
   /// Compares two cell values — numerically when both parse as numbers,
@@ -553,5 +605,181 @@ class _DataViewScreenState extends State<DataViewScreen> {
         ],
       ),
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Row editing & deleting
+  // ---------------------------------------------------------------------------
+
+  /// Opens a prefilled edit dialog for the row at [rowIndex] and saves
+  /// the changes back to the Google Sheet on confirm.
+  Future<void> _showEditDialog(int rowIndex) async {
+    final row = _rows[rowIndex];
+    final rowNumber = rowIndex + 2; // Row 1 is the header.
+    final formKey = GlobalKey<FormState>();
+    final controllers = <TextEditingController>[
+      for (var c = 0; c < _headers.length; c++)
+        TextEditingController(text: c < row.length ? row[c] : ''),
+    ];
+
+    List<String>? newValues;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Edit entry — row $rowNumber'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Form(
+            key: formKey,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (var c = 0; c < _headers.length; c++)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: _buildEditField(c, controllers[c]),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (!formKey.currentState!.validate()) return;
+              newValues = controllers.map((ctl) => ctl.text.trim()).toList();
+              Navigator.of(dialogContext).pop();
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    for (final ctl in controllers) {
+      ctl.dispose();
+    }
+
+    if (newValues == null || !mounted) return;
+
+    setState(() => _isMutating = true);
+    try {
+      await context.read<AppState>().sheetsService.updateRow(
+            spreadsheetId: widget.sheet.spreadsheetId,
+            sheetName: widget.sheet.name,
+            rowNumber: rowNumber,
+            rowValues: newValues!,
+          );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Entry updated.')),
+      );
+      await _loadData();
+      if (mounted) {
+        await context.read<AppState>().refreshSheetEntryStates();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to update entry: ${e.toString()}')),
+      );
+    } finally {
+      if (mounted) setState(() => _isMutating = false);
+    }
+  }
+
+  /// Builds one input field inside the edit dialog. Date fields open a
+  /// date picker, matching the Add Entry form behaviour.
+  Widget _buildEditField(int index, TextEditingController controller) {
+    final header = _headers[index];
+    final type = _fieldTypeFor(header);
+    final isDate = type == FieldType.date;
+
+    return TextFormField(
+      controller: controller,
+      readOnly: isDate,
+      keyboardType: type == FieldType.number
+          ? TextInputType.number
+          : TextInputType.text,
+      decoration: InputDecoration(
+        labelText: header,
+        border: const OutlineInputBorder(),
+        isDense: true,
+        suffixIcon: isDate ? const Icon(Icons.calendar_today) : null,
+      ),
+      onTap: isDate
+          ? () async {
+              final picked = await showDatePicker(
+                context: context,
+                initialDate:
+                    DateTime.tryParse(controller.text) ?? DateTime.now(),
+                firstDate: DateTime(2000),
+                lastDate: DateTime(2100),
+              );
+              if (picked != null) {
+                controller.text = DateFormat('yyyy-MM-dd').format(picked);
+              }
+            }
+          : null,
+    );
+  }
+
+  /// Confirms and deletes the row at [rowIndex] from the Google Sheet.
+  Future<void> _confirmDeleteRow(int rowIndex) async {
+    final row = _rows[rowIndex];
+    final rowNumber = rowIndex + 2; // Row 1 is the header.
+    final firstCell = row.isNotEmpty ? row.first : '(empty)';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete this entry?'),
+        content: Text(
+          'The record "$firstCell" (row $rowNumber) will be permanently '
+          'deleted from the sheet.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('No'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Yes'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isMutating = true);
+    try {
+      await context.read<AppState>().sheetsService.deleteRow(
+            spreadsheetId: widget.sheet.spreadsheetId,
+            sheetName: widget.sheet.name,
+            rowNumber: rowNumber,
+          );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Entry deleted.')),
+      );
+      await _loadData();
+      if (mounted) {
+        await context.read<AppState>().refreshSheetEntryStates();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to delete entry: ${e.toString()}')),
+      );
+    } finally {
+      if (mounted) setState(() => _isMutating = false);
+    }
   }
 }
