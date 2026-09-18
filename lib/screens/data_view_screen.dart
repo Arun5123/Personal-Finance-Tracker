@@ -200,11 +200,14 @@ class _DataViewScreenState extends State<DataViewScreen> {
 
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 250),
-      child: SingleChildScrollView(
-        key: ValueKey(visibleIndices.length),
-        scrollDirection: Axis.horizontal,
+      child: Align(
+        alignment: Alignment.topLeft,
         child: SingleChildScrollView(
-          child: DataTable(
+          key: ValueKey(visibleIndices.length),
+          scrollDirection: Axis.horizontal,
+          child: SingleChildScrollView(
+            scrollDirection: Axis.vertical,
+            child: DataTable(
             headingRowColor: MaterialStateProperty.all(Colors.blue.shade50),
             dataRowMinHeight: 44,
             dataRowMaxHeight: 56,
@@ -258,7 +261,8 @@ class _DataViewScreenState extends State<DataViewScreen> {
                       ),
                   ],
                 ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
